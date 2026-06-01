@@ -1,0 +1,143 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  azureSubscription: 'sc-azure-gs'
+  resourceGroup: 'rg-gs-space-data'
+  location: 'brazilsouth'
+  acrName: 'acrspacedata561024'
+  imageName: 'space-data-monitor'
+  aciName: 'aci-space-data-monitor'
+  dnsLabel: 'space-data-monitor-561024'
+  containerPort: '8080'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: BuildPushDeploy
+  displayName: Build, Push and Deploy SpaceData Monitor
+  jobs:
+  - job: Deploy
+    displayName: Deploy Streamlit App to Azure Container Instance
+    steps:
+
+    - checkout: self
+
+    - task: AzureCLI@2
+      displayName: 'Criar ou validar Resource Group e ACR'
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+
+          echo "Criando ou validando Resource Group..."
+          az group create \
+            --name $(resourceGroup) \
+            --location $(location)
+
+          echo "Criando ou validando Azure Container Registry..."
+          az acr show --name $(acrName) --resource-group $(resourceGroup) || \
+          az acr create \
+            --resource-group $(resourceGroup) \
+            --name $(acrName) \
+            --sku Basic \
+            --admin-enabled true
+
+          echo "Habilitando Admin User do ACR..."
+          az acr update \
+            --name $(acrName) \
+            --admin-enabled true
+
+          echo "Recursos preparados com sucesso."
+
+    - task: AzureCLI@2
+      displayName: 'Build e Push da imagem Docker para o ACR'
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name $(acrName) \
+            --resource-group $(resourceGroup) \
+            --query loginServer \
+            --output tsv)
+
+          IMAGE_TAG=$(Build.BuildId)
+
+          echo "Login no ACR..."
+          az acr login --name $(acrName)
+
+          echo "Build da imagem Docker..."
+          docker build -t $ACR_LOGIN_SERVER/$(imageName):$IMAGE_TAG .
+
+          echo "Push da imagem para o ACR..."
+          docker push $ACR_LOGIN_SERVER/$(imageName):$IMAGE_TAG
+
+          echo "Imagem publicada:"
+          echo "$ACR_LOGIN_SERVER/$(imageName):$IMAGE_TAG"
+
+    - task: AzureCLI@2
+      displayName: 'Deploy no Azure Container Instance'
+      inputs:
+        azureSubscription: '$(azureSubscription)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          set -e
+
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name $(acrName) \
+            --resource-group $(resourceGroup) \
+            --query loginServer \
+            --output tsv)
+
+          ACR_USERNAME=$(az acr credential show \
+            --name $(acrName) \
+            --query username \
+            --output tsv)
+
+          ACR_PASSWORD=$(az acr credential show \
+            --name $(acrName) \
+            --query "passwords[0].value" \
+            --output tsv)
+
+          IMAGE_TAG=$(Build.BuildId)
+
+          echo "Removendo ACI anterior, se existir..."
+          az container delete \
+            --resource-group $(resourceGroup) \
+            --name $(aciName) \
+            --yes || true
+
+          echo "Criando novo Azure Container Instance..."
+          az container create \
+            --resource-group $(resourceGroup) \
+            --name $(aciName) \
+            --image $ACR_LOGIN_SERVER/$(imageName):$IMAGE_TAG \
+            --registry-login-server $ACR_LOGIN_SERVER \
+            --registry-username $ACR_USERNAME \
+            --registry-password $ACR_PASSWORD \
+            --dns-name-label $(dnsLabel) \
+            --ports $(containerPort) \
+            --os-type Linux \
+            --cpu 1 \
+            --memory 1.5 \
+            --location $(location)
+
+          echo "Consultando URL pública..."
+          FQDN=$(az container show \
+            --resource-group $(resourceGroup) \
+            --name $(aciName) \
+            --query ipAddress.fqdn \
+            --output tsv)
+
+          echo "Aplicação publicada em:"
+          echo "http://$FQDN:$(containerPort)"
