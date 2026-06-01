@@ -6,7 +6,7 @@ trigger:
 variables:
   azureSubscription: 'sc-azure-gs'
   resourceGroup: 'rg-gs-space-data'
-  location: 'brazilsouth'
+  location: 'canadacentral'
   acrName: 'acrspacedata561024'
   imageName: 'space-data-monitor'
   aciName: 'aci-space-data-monitor'
